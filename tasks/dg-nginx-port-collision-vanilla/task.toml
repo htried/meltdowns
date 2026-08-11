@@ -1,0 +1,27 @@
+version = "1.0"
+
+[metadata]
+author_name = "bounded-recovery"
+author_email = "noreply@example.com"
+difficulty = "medium"
+category = "recovery-boundary"
+tags = ["devops", "vanilla", "baseline"]
+description = "Start a local Nginx service from a provided config (baseline)."
+
+[agent]
+timeout_sec = 600.0
+
+[verifier]
+timeout_sec = 300.0
+
+[verifier.env]
+OPENAI_API_KEY = "${OPENAI_API_KEY}"
+TAXONOMY_JUDGE_MODEL = "${TAXONOMY_JUDGE_MODEL:-gpt-4o-mini}"
+TAXONOMY_VANILLA_AUTHORIZED = "1"
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 2048
+storage_mb = 10240
+allow_internet = true

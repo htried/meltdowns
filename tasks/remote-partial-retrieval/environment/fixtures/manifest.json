@@ -1,0 +1,25 @@
+{
+  "rules": [
+    {
+      "host": "www.cs.cornell.edu",
+      "path_prefix": "/~shmat/",
+      "file": "partial_page.html",
+      "content_type": "text/html; charset=utf-8",
+      "status": 200
+    },
+    {
+      "host": "rishijha.com",
+      "path_prefix": "/",
+      "file": "partial_page.html",
+      "content_type": "text/html; charset=utf-8",
+      "status": 200
+    },
+    {
+      "host": "haltriedman.com",
+      "path_prefix": "/",
+      "file": "partial_page.html",
+      "content_type": "text/html; charset=utf-8",
+      "status": 200
+    }
+  ]
+}

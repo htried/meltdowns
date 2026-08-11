@@ -1,0 +1,16 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+my $msg = join(' ', @ARGV) || "Moo";
+my $len = length($msg);
+my $border = "-" x ($len + 2);
+
+print "  $border\n";
+print "< $msg >\n";
+print "  $border\n";
+print "        \\   ^__^\n";
+print "         \\  (oo)\\_______\n";
+print "            (__)\\       )\\/\\\n";
+print "                ||----w |\n";
+print "                ||     ||\n";

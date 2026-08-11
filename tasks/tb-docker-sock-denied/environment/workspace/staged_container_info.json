@@ -1,0 +1,7 @@
+{
+  "active_containers": [
+    {"name": "web-frontend-service", "id": "d3b07384d113", "status": "running"},
+    {"name": "catalog-db", "id": "a842ded15d4b", "status": "running"},
+    {"name": "redis-cache", "id": "8d9c5ca4b5f1", "status": "exited"}
+  ]
+}

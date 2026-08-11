@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Thin wrapper around `harbor run` with Meltdowns egress defaults.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HARBOR_BIN="${HARBOR_BIN:-${HOME}/.venvs/harbor/bin/harbor}"
+if ! command -v "$HARBOR_BIN" >/dev/null 2>&1; then
+  if command -v harbor >/dev/null 2>&1; then
+    HARBOR_BIN="$(command -v harbor)"
+  else
+    echo "meltdowns: harbor CLI not found (set HARBOR_BIN or install harbor)" >&2
+    exit 1
+  fi
+fi
+
+ALLOW_THIRD_PARTY=0
+FORWARD=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --allow-third-party-internet)
+      ALLOW_THIRD_PARTY=1
+      shift
+      ;;
+    *)
+      FORWARD+=("$1")
+      shift
+      ;;
+  esac
+done
+
+ENV_FILE="${ROOT}/.env"
+EXTRA_ENV=()
+if [[ "$ALLOW_THIRD_PARTY" -eq 1 ]]; then
+  echo "meltdowns: WARNING: --allow-third-party-internet enables egress to arbitrary third-party services." >&2
+  EXTRA_ENV+=(--ae "MELTDOWNS_ALLOW_THIRD_PARTY=1")
+  EXTRA_ENV+=(--ae "EGRESS_MODE=open")
+else
+  EXTRA_ENV+=(--ae "EGRESS_MODE=allowlist")
+  EXTRA_ENV+=(--ae "MELTDOWNS_ALLOW_THIRD_PARTY=0")
+fi
+
+has_env_file=0
+for arg in "${FORWARD[@]+"${FORWARD[@]}"}"; do
+  if [[ "$arg" == "--env-file" || "$arg" == --env-file=* ]]; then
+    has_env_file=1
+    break
+  fi
+done
+ENV_ARGS=()
+if [[ "$has_env_file" -eq 0 && -f "$ENV_FILE" ]]; then
+  ENV_ARGS+=(--env-file "$ENV_FILE")
+fi
+
+exec "$HARBOR_BIN" run "${EXTRA_ENV[@]}" "${ENV_ARGS[@]}" "${FORWARD[@]+"${FORWARD[@]}"}"

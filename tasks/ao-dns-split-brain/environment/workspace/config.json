@@ -1,0 +1,4 @@
+{
+  "catalog_url": "http://primary-catalog.service.local/items",
+  "backup_url": "http://127.0.0.1:8080/items"
+}
