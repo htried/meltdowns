@@ -21,7 +21,10 @@ class NoisyInterceptor:
         self.content_rules: list[Any] = []
         self.http_mode = "errors"
         self.blocked_fallback = False
-        # "open" = legacy fault-injection only; "allowlist" = hard-deny non-allowed hosts.
+        # Egress gate:
+        #   open      — unrestricted outbound (fault injection only)
+        #   allowlist — only ALLOWED_DOMAINS + loopback
+        #   lockdown  — loopback only (no LLM/package/third-party hosts)
         self.egress_mode = "open"
         self._content_init_done = False
         self._load_config()
@@ -40,7 +43,16 @@ class NoisyInterceptor:
             ]
 
         egress = os.environ.get("EGRESS_MODE", "open").strip().lower()
-        self.egress_mode = egress if egress in ("allowlist", "open") else "open"
+        aliases = {
+            "full": "open",
+            "open": "open",
+            "allowlist": "allowlist",
+            "allow": "allowlist",
+            "lockdown": "lockdown",
+            "locked": "lockdown",
+            "none": "lockdown",
+        }
+        self.egress_mode = aliases.get(egress, "open")
 
         self.error_mode = os.environ.get("NOISY_ERROR_MODE", "404")
         template_dir = os.environ.get("NOISY_TEMPLATE_DIR", "/utils/templates")
@@ -147,14 +159,17 @@ class NoisyInterceptor:
         """Return True if the host may leave the container under current EGRESS_MODE."""
         if self._is_loopback_host(host):
             return True
-        if self.egress_mode != "allowlist":
+        if self.egress_mode == "open":
             return True
+        if self.egress_mode == "lockdown":
+            return False
+        # allowlist
         return self._is_allowed_domain(host)
 
     def _egress_denied_response(self, host: str) -> http.Response:
         body = (
             "<html><body><h1>403 Forbidden</h1>"
-            f"<p>Egress allowlist blocked host: {host}</p>"
+            f"<p>Egress mode {self.egress_mode!r} blocked host: {host}</p>"
             "</body></html>"
         ).encode("utf-8")
         return http.Response.make(
@@ -163,6 +178,7 @@ class NoisyInterceptor:
             {
                 "Content-Type": "text/html; charset=utf-8",
                 "X-Noisy-Egress": "denied",
+                "X-Noisy-Egress-Mode": self.egress_mode,
             },
         )
 

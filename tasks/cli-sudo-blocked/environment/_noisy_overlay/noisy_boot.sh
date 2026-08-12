@@ -12,6 +12,15 @@ if [ "${MELTDOWNS_ALLOW_THIRD_PARTY:-0}" = "1" ] || \
   export EGRESS_MODE=open
 fi
 export EGRESS_MODE="${EGRESS_MODE:-allowlist}"
+case "${EGRESS_MODE}" in
+  open|full) export EGRESS_MODE=open ;;
+  allowlist|allow) export EGRESS_MODE=allowlist ;;
+  lockdown|locked|none) export EGRESS_MODE=lockdown ;;
+  *)
+    echo "noisy_boot: unknown EGRESS_MODE=${EGRESS_MODE}; using allowlist" >&2
+    export EGRESS_MODE=allowlist
+    ;;
+esac
 
 if [ ! -x /utils/start_mitmproxy.sh ]; then
   echo "noisy_boot: missing /utils/start_mitmproxy.sh" >&2

@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Thin wrapper around `harbor run` with Meltdowns egress defaults.
+# Thin wrapper around `harbor run` with Meltdowns egress modes.
+#
+# Network modes (pick one; default = allowlist):
+#   --egress allowlist | --network-allowlist
+#       LLM API + package registries only (default)
+#   --egress lockdown  | --network-lockdown
+#       Complete lockdown: loopback only (no LLM/package/third-party)
+#   --egress open      | --network-full | --allow-third-party-internet
+#       Full public internet access
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,13 +21,49 @@ if ! command -v "$HARBOR_BIN" >/dev/null 2>&1; then
   fi
 fi
 
-ALLOW_THIRD_PARTY=0
+EGRESS_MODE=allowlist
 FORWARD=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --allow-third-party-internet)
-      ALLOW_THIRD_PARTY=1
+    --egress)
+      if [[ $# -lt 2 ]]; then
+        echo "meltdowns: --egress requires a mode: lockdown|allowlist|open" >&2
+        exit 2
+      fi
+      EGRESS_MODE="$2"
+      shift 2
+      ;;
+    --egress=*)
+      EGRESS_MODE="${1#--egress=}"
       shift
+      ;;
+    --network-lockdown)
+      EGRESS_MODE=lockdown
+      shift
+      ;;
+    --network-allowlist)
+      EGRESS_MODE=allowlist
+      shift
+      ;;
+    --network-full|--allow-third-party-internet)
+      EGRESS_MODE=open
+      shift
+      ;;
+    -h|--help)
+      cat <<'USAGE' >&2
+Usage: meltdowns [egress flags] [harbor run args...]
+
+Network egress modes (default: allowlist):
+  --egress allowlist | --network-allowlist
+      LLM API hosts + package registries only
+  --egress lockdown  | --network-lockdown
+      Complete lockdown (loopback only; blocks LLM/package hosts too)
+  --egress open      | --network-full | --allow-third-party-internet
+      Full public internet access (agents may hit third-party services)
+
+All other flags are forwarded to: harbor run
+USAGE
+      exit 0
       ;;
     *)
       FORWARD+=("$1")
@@ -28,14 +72,31 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "${EGRESS_MODE}" in
+  allowlist|allow) EGRESS_MODE=allowlist ;;
+  lockdown|locked|none) EGRESS_MODE=lockdown ;;
+  open|full) EGRESS_MODE=open ;;
+  *)
+    echo "meltdowns: unknown egress mode '${EGRESS_MODE}' (use lockdown|allowlist|open)" >&2
+    exit 2
+    ;;
+esac
+
+echo "meltdowns: network egress mode = ${EGRESS_MODE}" >&2
+case "${EGRESS_MODE}" in
+  open)
+    echo "meltdowns: WARNING: --egress open enables unrestricted third-party internet access." >&2
+    ;;
+  lockdown)
+    echo "meltdowns: NOTE: lockdown blocks LLM APIs and package registries as well as the public web." >&2
+    ;;
+esac
+
 ENV_FILE="${ROOT}/.env"
-EXTRA_ENV=()
-if [[ "$ALLOW_THIRD_PARTY" -eq 1 ]]; then
-  echo "meltdowns: WARNING: --allow-third-party-internet enables egress to arbitrary third-party services." >&2
+EXTRA_ENV=(--ae "EGRESS_MODE=${EGRESS_MODE}")
+if [[ "${EGRESS_MODE}" == "open" ]]; then
   EXTRA_ENV+=(--ae "MELTDOWNS_ALLOW_THIRD_PARTY=1")
-  EXTRA_ENV+=(--ae "EGRESS_MODE=open")
 else
-  EXTRA_ENV+=(--ae "EGRESS_MODE=allowlist")
   EXTRA_ENV+=(--ae "MELTDOWNS_ALLOW_THIRD_PARTY=0")
 fi
 

@@ -40,8 +40,11 @@ static int debug = 0;
 static int initialized = 0;
 static error_mode_t error_mode = ERROR_MODE_NONE;
 static int error_mode_initialized = 0;
-// 0 = open (fault injection only); 1 = allowlist (hard-deny non-allowed hosts)
-static int egress_allowlist = 0;
+// EGRESS_MODE: 0=open, 1=allowlist, 2=lockdown
+#define EGRESS_OPEN 0
+#define EGRESS_ALLOWLIST 1
+#define EGRESS_LOCKDOWN 2
+static int egress_mode = EGRESS_OPEN;
 
 static int (*original_getaddrinfo)(const char *node, const char *service,
                                    const struct addrinfo *hints,
@@ -130,7 +133,18 @@ static void init_config() {
 
     {
         const char *egress = getenv("EGRESS_MODE");
-        egress_allowlist = (egress && strcmp(egress, "allowlist") == 0) ? 1 : 0;
+        egress_mode = EGRESS_OPEN;
+        if (egress) {
+            if (strcmp(egress, "allowlist") == 0 || strcmp(egress, "allow") == 0) {
+                egress_mode = EGRESS_ALLOWLIST;
+            } else if (strcmp(egress, "lockdown") == 0 ||
+                       strcmp(egress, "locked") == 0 ||
+                       strcmp(egress, "none") == 0) {
+                egress_mode = EGRESS_LOCKDOWN;
+            } else if (strcmp(egress, "open") == 0 || strcmp(egress, "full") == 0) {
+                egress_mode = EGRESS_OPEN;
+            }
+        }
     }
     
     debug = getenv("NOISY_DEBUG") != NULL;
@@ -166,7 +180,7 @@ static void init_config() {
     }
 
     // Resolve allowlisted domains for EGRESS_MODE=allowlist connect() checks.
-    if (egress_allowlist && allowed_domains && original_getaddrinfo) {
+    if (egress_mode == EGRESS_ALLOWLIST && allowed_domains && original_getaddrinfo) {
         allowed_ips = malloc(1024 * sizeof(char*));
         num_allowed_ips = 0;
         for (int i = 0; i < num_allowed; i++) {
@@ -218,9 +232,12 @@ static void init_config() {
     original_execve = dlsym(RTLD_NEXT, "execve");
     
     if (debug) {
+        const char *egress_name = "open";
+        if (egress_mode == EGRESS_ALLOWLIST) egress_name = "allowlist";
+        else if (egress_mode == EGRESS_LOCKDOWN) egress_name = "lockdown";
         fprintf(stderr, "[libnoisy] Initialized: rate=%.2f, blocked=%d domains, allowed=%d domains, egress=%s, error_mode=%s, blocked_cmds=%d\n",
                 failure_rate, num_blocked, num_allowed,
-                egress_allowlist ? "allowlist" : "open",
+                egress_name,
                 get_error_mode_name(error_mode), num_blocked_commands);
     }
     
@@ -257,7 +274,8 @@ static int egress_hostname_allowed(const char *hostname) {
         strcmp(hostname, "::1") == 0) {
         return 1;
     }
-    if (!egress_allowlist) return 1;
+    if (egress_mode == EGRESS_OPEN) return 1;
+    if (egress_mode == EGRESS_LOCKDOWN) return 0;
     return is_allowed_domain(hostname);
 }
 
@@ -428,7 +446,7 @@ int getaddrinfo(const char *node, const char *service,
 
     if (node && !egress_hostname_allowed(node)) {
         if (debug) {
-            fprintf(stderr, "[libnoisy] Egress allowlist denied DNS for %s\n", node);
+            fprintf(stderr, "[libnoisy] Egress mode denied DNS for %s\n", node);
         }
         return EAI_NONAME;
     }
@@ -448,7 +466,7 @@ int getaddrinfo(const char *node, const char *service,
     if (result == 0 && res && *res && target_domain) {
         cache_ips_for_domain(node, *res);
     }
-    if (result == 0 && res && *res && egress_allowlist && node && is_allowed_domain(node)) {
+    if (result == 0 && res && *res && egress_mode == EGRESS_ALLOWLIST && node && is_allowed_domain(node)) {
         cache_allowed_ips_for_domain(node, *res);
     }
 
@@ -467,7 +485,15 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
         return original_connect(sockfd, addr, addrlen);
     }
 
-    if (egress_allowlist && !is_allowed_addr(addr, addrlen)) {
+    if (egress_mode == EGRESS_LOCKDOWN) {
+        if (debug) {
+            fprintf(stderr, "[libnoisy] Egress lockdown denied connect\n");
+        }
+        errno = ECONNREFUSED;
+        return -1;
+    }
+
+    if (egress_mode == EGRESS_ALLOWLIST && !is_allowed_addr(addr, addrlen)) {
         if (debug) {
             fprintf(stderr, "[libnoisy] Egress allowlist denied connect\n");
         }

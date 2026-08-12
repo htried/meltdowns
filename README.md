@@ -15,34 +15,59 @@ noisy overlay (`_noisy_overlay/`: `libnoisy.so` + mitmproxy).
 ## Quick start
 
 ```bash
-# from this repo root
+# from this repo root (default network mode: allowlist)
 ./scripts/meltdowns -p tasks/local-missing-dependency \
   -e docker -a opencode -m openai/gpt-4o-mini --env-file .env --yes
 ```
 
 The `scripts/meltdowns` wrapper forwards all unknown flags to `harbor run`.
 
-## Third-party internet (off by default)
+## Network egress modes
 
-By default, task containers only allow egress to **LLM API hosts** and **package
-registries** (PyPI, npm, GitHub release/raw hosts). Other public websites are
-blocked inside the container.
+Containers enforce one of three outbound network modes via `--egress`:
 
-To allow agents to reach arbitrary third-party services (required for live remote
-URL scenarios such as `remote-named-url-404`, `remote-rate-limit-429`, and
-`remote-partial-retrieval`), pass:
+| Mode | Flag | What the agent can reach |
+|------|------|--------------------------|
+| **allowlist** (default) | `--egress allowlist` | LLM API hosts + package registries only (PyPI, npm, GitHub release/raw). No general web. |
+| **lockdown** | `--egress lockdown` | Loopback only (`localhost` / `127.0.0.1`). Blocks LLM APIs, package installs, and all third-party sites. |
+| **open** (full access) | `--egress open` | Unrestricted public internet. |
+
+Aliases:
+
+- `--network-allowlist` → allowlist
+- `--network-lockdown` → lockdown
+- `--network-full` / `--allow-third-party-internet` → open
+
+Examples:
 
 ```bash
-./scripts/meltdowns --allow-third-party-internet \
+# Default: allowlist (LLM + package hosts only)
+./scripts/meltdowns -p tasks/local-missing-dependency \
+  -e docker -a opencode -m openai/gpt-4o-mini --env-file .env --yes
+
+# Complete lockdown (no outbound internet at all)
+./scripts/meltdowns --egress lockdown \
+  -p tasks/local-missing-dependency \
+  -e docker -a opencode -m openai/gpt-4o-mini --env-file .env --yes
+
+# Full third-party internet (needed for live remote URL scenarios)
+./scripts/meltdowns --egress open \
   -p tasks/remote-rate-limit-429 \
   -e docker -a opencode -m openai/gpt-4o-mini --env-file .env --yes
 ```
 
-**Warning:** `--allow-third-party-internet` lets the agent contact third-party
-network services on the public internet. Only enable it when you accept that
-risk for the run.
+**Warnings:**
 
-Approved scenario hosts used by remote tasks (when third-party egress is on):
+- `--egress open` lets the agent contact arbitrary third-party services on the
+  public internet. Only enable it when you accept that risk.
+- `--egress lockdown` also blocks LLM provider APIs and package registries, so
+  typical cloud-backed agents will fail unless they do not need outbound calls.
+
+Remote scenarios that hit live approved hosts
+(`remote-named-url-404`, `remote-rate-limit-429`, `remote-partial-retrieval`)
+require `--egress open`.
+
+Approved scenario hosts (reachable only when egress is `open`):
 
 - `https://haltriedman.com/`
 - `https://rishijha.com/`
