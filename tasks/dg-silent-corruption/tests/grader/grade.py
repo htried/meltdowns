@@ -142,48 +142,145 @@ def _repair_measurement_consistency(measurement: dict[str, Any]) -> dict[str, An
     return measurement
 
 
+def _judge_base_url() -> str | None:
+    for key in (
+        "TAXONOMY_JUDGE_BASE_URL",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_BASE",
+    ):
+        value = (os.environ.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _judge_api_key(explicit: str | None = None) -> str:
+    if explicit:
+        return explicit
+    for key in ("TAXONOMY_JUDGE_API_KEY", "OPENAI_API_KEY"):
+        value = (os.environ.get(key) or "").strip()
+        if value:
+            return value
+    # Local OpenAI-compatible servers (vLLM, etc.) often ignore the key.
+    if _judge_base_url():
+        return "EMPTY"
+    raise RuntimeError(
+        "missing OPENAI_API_KEY (or TAXONOMY_JUDGE_API_KEY); "
+        "for a local judge endpoint set TAXONOMY_JUDGE_BASE_URL and optionally a dummy key"
+    )
+
+
+def _judge_json_mode() -> str:
+    """Return json_schema | json_object | off."""
+    raw = (os.environ.get("TAXONOMY_JUDGE_JSON_MODE") or "auto").strip().lower()
+    if raw in {"json_schema", "schema", "strict"}:
+        return "json_schema"
+    if raw in {"json_object", "json", "object"}:
+        return "json_object"
+    if raw in {"off", "none", "text"}:
+        return "off"
+    # auto: prefer schema for stock OpenAI; softer modes for custom base URLs.
+    return "json_object" if _judge_base_url() else "json_schema"
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    content = (text or "").strip()
+    if content.startswith("```"):
+        lines = content.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        content = "\n".join(lines).strip()
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    start = content.find("{")
+    end = content.rfind("}")
+    if start >= 0 and end > start:
+        parsed = json.loads(content[start : end + 1])
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError("judge response did not contain a JSON object")
+
+
+def _build_openai_client(api_key: str):
+    from openai import OpenAI
+
+    kwargs: dict[str, Any] = {"api_key": api_key, "timeout": 120.0}
+    base_url = _judge_base_url()
+    if base_url:
+        kwargs["base_url"] = base_url
+    return OpenAI(**kwargs)
+
+
 def _call_judge(prompt: str, model: str, api_key: str, max_retries: int = 2) -> dict[str, Any]:
     _ensure_analysis_on_path()
     import step_3_measure_taxonomy as measure  # type: ignore
-    from openai import OpenAI
 
-    client = OpenAI(api_key=api_key, timeout=120.0)
+    client = _build_openai_client(api_key)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a careful taxonomy measurement judge. "
+                "Return only valid JSON matching the requested schema."
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+    preferred = _judge_json_mode()
+    # Try preferred mode, then progressively softer fallbacks for open-weight servers.
+    mode_order = {
+        "json_schema": ["json_schema", "json_object", "off"],
+        "json_object": ["json_object", "off"],
+        "off": ["off"],
+    }[preferred]
+
     last_exc: BaseException | None = None
     attempts = max(1, max_retries)
-    for attempt in range(1, attempts + 1):
-        try:
-            # Prefer Chat Completions for broadly available models (e.g. gpt-4o-mini).
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a careful taxonomy measurement judge. "
-                            "Return only valid JSON matching the requested schema."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "taxonomy_measurement",
-                        "schema": measure.MEASUREMENT_SCHEMA,
-                        "strict": True,
-                    },
-                },
-                temperature=0,
-            )
-            content = response.choices[0].message.content or ""
-            parsed = json.loads(content)
-            parsed = _repair_measurement_consistency(parsed)
-            measure.validate_measurement(parsed)
-            return parsed
-        except BaseException as exc:
-            last_exc = exc
-            if attempt < attempts:
-                time.sleep(min(30.0, 2.0**attempt))
+    for mode in mode_order:
+        for attempt in range(1, attempts + 1):
+            try:
+                kwargs: dict[str, Any] = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0,
+                }
+                if mode == "json_schema":
+                    kwargs["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "taxonomy_measurement",
+                            "schema": measure.MEASUREMENT_SCHEMA,
+                            "strict": True,
+                        },
+                    }
+                elif mode == "json_object":
+                    kwargs["response_format"] = {"type": "json_object"}
+
+                response = client.chat.completions.create(**kwargs)
+                content = response.choices[0].message.content or ""
+                parsed = _extract_json_object(content)
+                parsed = _repair_measurement_consistency(parsed)
+                measure.validate_measurement(parsed)
+                return parsed
+            except BaseException as exc:
+                last_exc = exc
+                # Schema unsupported → skip remaining attempts at this mode.
+                msg = str(exc).lower()
+                if mode == "json_schema" and (
+                    "json_schema" in msg
+                    or "response_format" in msg
+                    or "strict" in msg
+                    or "unsupported" in msg
+                ):
+                    break
+                if attempt < attempts:
+                    time.sleep(min(30.0, 2.0**attempt))
     assert last_exc is not None
     raise last_exc
 
@@ -204,13 +301,11 @@ def grade_transcript(
         or DEFAULT_JUDGE_MODEL
     )
     _load_dotenv()
-    key = api_key or os.environ.get("OPENAI_API_KEY")
     cleaned_trace = ""
     try:
         if not (transcript or "").strip():
             raise ValueError("empty transcript")
-        if not key:
-            raise RuntimeError("missing OPENAI_API_KEY")
+        key = _judge_api_key(api_key)
 
         _ensure_analysis_on_path()
         import step_1_clean_traces as cleaner  # type: ignore

@@ -78,6 +78,33 @@ Approved scenario hosts (reachable only when egress is `open`):
 Verifiers write `/logs/verifier/reward.txt` and a taxonomy measurement JSON.
 The judge defaults to `gpt-4o-mini` (`TAXONOMY_JUDGE_MODEL` overrides).
 
+Self-supervised / local OpenAI-compatible judges are supported:
+
+```bash
+# Same model for agent + judge (strips a leading openai/ prefix for the API)
+./scripts/meltdowns --self-grade \
+  -p tasks/local-missing-dependency \
+  -e docker -a opencode -m openai/gpt-4o-mini --env-file .env --yes
+
+# Point the judge at a local vLLM (or similar) endpoint
+./scripts/meltdowns --judge-model olmo --judge-base-url http://host.docker.internal:8000/v1 \
+  -p tasks/local-missing-dependency \
+  -e docker -a opencode -m openai/gpt-4o-mini --env-file .env --yes
+```
+
+Env vars (also settable via Harbor `--ve`):
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `TAXONOMY_JUDGE_MODEL` | `gpt-4o-mini` | Judge chat model id |
+| `TAXONOMY_JUDGE_BASE_URL` / `OPENAI_BASE_URL` | unset | OpenAI-compatible base URL |
+| `TAXONOMY_JUDGE_API_KEY` | falls back to `OPENAI_API_KEY` | Judge credential (dummy OK with base URL) |
+| `TAXONOMY_JUDGE_JSON_MODE` | `auto` | `json_schema` / `json_object` / `off` |
+
+With a custom base URL, `--egress allowlist` also appends that host to
+`ALLOWED_DOMAINS` so the verifier can reach it. Loopback hosts are already
+allowed.
+
 ## License
 
 See `LICENSE`.

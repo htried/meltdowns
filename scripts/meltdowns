@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Thin wrapper around `harbor run` with Meltdowns egress modes.
+# Thin wrapper around `harbor run` with Meltdowns egress modes + judge wiring.
 #
 # Network modes (pick one; default = allowlist):
 #   --egress allowlist | --network-allowlist
@@ -8,6 +8,11 @@
 #       Complete lockdown: loopback only (no LLM/package/third-party)
 #   --egress open      | --network-full | --allow-third-party-internet
 #       Full public internet access
+#
+# Judge / self-grade:
+#   --judge-model MODEL
+#   --judge-base-url URL
+#   --self-grade          # judge model follows agent -m / --model
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,6 +27,9 @@ if ! command -v "$HARBOR_BIN" >/dev/null 2>&1; then
 fi
 
 EGRESS_MODE=allowlist
+JUDGE_MODEL=""
+JUDGE_BASE_URL=""
+SELF_GRADE=0
 FORWARD=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -49,9 +57,37 @@ while [[ $# -gt 0 ]]; do
       EGRESS_MODE=open
       shift
       ;;
+    --judge-model)
+      if [[ $# -lt 2 ]]; then
+        echo "meltdowns: --judge-model requires a model id" >&2
+        exit 2
+      fi
+      JUDGE_MODEL="$2"
+      shift 2
+      ;;
+    --judge-model=*)
+      JUDGE_MODEL="${1#--judge-model=}"
+      shift
+      ;;
+    --judge-base-url)
+      if [[ $# -lt 2 ]]; then
+        echo "meltdowns: --judge-base-url requires a URL" >&2
+        exit 2
+      fi
+      JUDGE_BASE_URL="$2"
+      shift 2
+      ;;
+    --judge-base-url=*)
+      JUDGE_BASE_URL="${1#--judge-base-url=}"
+      shift
+      ;;
+    --self-grade)
+      SELF_GRADE=1
+      shift
+      ;;
     -h|--help)
       cat <<'USAGE' >&2
-Usage: meltdowns [egress flags] [harbor run args...]
+Usage: meltdowns [egress/judge flags] [harbor run args...]
 
 Network egress modes (default: allowlist):
   --egress allowlist | --network-allowlist
@@ -60,6 +96,11 @@ Network egress modes (default: allowlist):
       Complete lockdown (loopback only; blocks LLM/package hosts too)
   --egress open      | --network-full | --allow-third-party-internet
       Full public internet access (agents may hit third-party services)
+
+Judge / self-supervision:
+  --judge-model MODEL       Override taxonomy judge model
+  --judge-base-url URL      OpenAI-compatible base URL for the judge
+  --self-grade              Use the agent -m/--model as the judge model
 
 All other flags are forwarded to: harbor run
 USAGE
@@ -82,6 +123,44 @@ case "${EGRESS_MODE}" in
     ;;
 esac
 
+# Resolve agent model from forwarded harbor args (for --self-grade).
+AGENT_MODEL=""
+prev=""
+for arg in "${FORWARD[@]+"${FORWARD[@]}"}"; do
+  if [[ "$prev" == "-m" || "$prev" == "--model" ]]; then
+    AGENT_MODEL="$arg"
+    break
+  fi
+  case "$arg" in
+    -m=*|--model=*)
+      AGENT_MODEL="${arg#*=}"
+      break
+      ;;
+  esac
+  prev="$arg"
+done
+
+normalize_judge_model() {
+  local m="$1"
+  case "$m" in
+    openai/*) echo "${m#openai/}" ;;
+    anthropic/*) echo "${m#anthropic/}" ;;
+    google/*) echo "${m#google/}" ;;
+    gemini/*) echo "${m#gemini/}" ;;
+    *) echo "$m" ;;
+  esac
+}
+
+if [[ "$SELF_GRADE" -eq 1 ]]; then
+  if [[ -z "$JUDGE_MODEL" ]]; then
+    if [[ -z "$AGENT_MODEL" ]]; then
+      echo "meltdowns: --self-grade requires -m/--model (or pass --judge-model)" >&2
+      exit 2
+    fi
+    JUDGE_MODEL="$(normalize_judge_model "$AGENT_MODEL")"
+  fi
+fi
+
 echo "meltdowns: network egress mode = ${EGRESS_MODE}" >&2
 case "${EGRESS_MODE}" in
   open)
@@ -91,6 +170,12 @@ case "${EGRESS_MODE}" in
     echo "meltdowns: NOTE: lockdown blocks LLM APIs and package registries as well as the public web." >&2
     ;;
 esac
+if [[ -n "$JUDGE_MODEL" ]]; then
+  echo "meltdowns: taxonomy judge model = ${JUDGE_MODEL}" >&2
+fi
+if [[ -n "$JUDGE_BASE_URL" ]]; then
+  echo "meltdowns: taxonomy judge base URL = ${JUDGE_BASE_URL}" >&2
+fi
 
 ENV_FILE="${ROOT}/.env"
 EXTRA_ENV=(--ae "EGRESS_MODE=${EGRESS_MODE}")
@@ -98,6 +183,29 @@ if [[ "${EGRESS_MODE}" == "open" ]]; then
   EXTRA_ENV+=(--ae "MELTDOWNS_ALLOW_THIRD_PARTY=1")
 else
   EXTRA_ENV+=(--ae "MELTDOWNS_ALLOW_THIRD_PARTY=0")
+fi
+
+EXTRA_VE=()
+if [[ -n "$JUDGE_MODEL" ]]; then
+  EXTRA_VE+=(--ve "TAXONOMY_JUDGE_MODEL=${JUDGE_MODEL}")
+fi
+if [[ -n "$JUDGE_BASE_URL" ]]; then
+  EXTRA_VE+=(--ve "TAXONOMY_JUDGE_BASE_URL=${JUDGE_BASE_URL}")
+  EXTRA_VE+=(--ve "OPENAI_BASE_URL=${JUDGE_BASE_URL}")
+  # Ensure allowlist egress can reach a non-loopback judge host.
+  JUDGE_HOST="$(python3 - "$JUDGE_BASE_URL" <<'PY'
+import sys
+from urllib.parse import urlparse
+u = urlparse(sys.argv[1])
+host = (u.hostname or "").strip().lower()
+print(host)
+PY
+)"
+  if [[ -n "$JUDGE_HOST" && "$JUDGE_HOST" != "localhost" && "$JUDGE_HOST" != "127.0.0.1" && "$JUDGE_HOST" != "::1" ]]; then
+    DEFAULT_ALLOWED="api.openai.com,api.anthropic.com,generativelanguage.googleapis.com,api.x.ai,pypi.org,files.pythonhosted.org,registry.npmjs.org,nodejs.org,github.com,raw.githubusercontent.com,objects.githubusercontent.com"
+    EXTRA_ENV+=(--ae "ALLOWED_DOMAINS=${DEFAULT_ALLOWED},${JUDGE_HOST}")
+    echo "meltdowns: appended judge host to ALLOWED_DOMAINS: ${JUDGE_HOST}" >&2
+  fi
 fi
 
 has_env_file=0
@@ -112,4 +220,4 @@ if [[ "$has_env_file" -eq 0 && -f "$ENV_FILE" ]]; then
   ENV_ARGS+=(--env-file "$ENV_FILE")
 fi
 
-exec "$HARBOR_BIN" run "${EXTRA_ENV[@]}" "${ENV_ARGS[@]}" "${FORWARD[@]+"${FORWARD[@]}"}"
+exec "$HARBOR_BIN" run "${EXTRA_ENV[@]}" "${EXTRA_VE[@]}" "${ENV_ARGS[@]}" "${FORWARD[@]+"${FORWARD[@]}"}"
